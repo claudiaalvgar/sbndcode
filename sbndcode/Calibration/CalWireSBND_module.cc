@@ -45,8 +45,7 @@
 
 #include "TComplex.h"
 #include "TFile.h"
-#include "TH2D.h"
-#include "TF1.h"
+#include "TH1F.h"
 
 ///creation of calibrated signals on wires
 namespace caldata {
@@ -78,27 +77,26 @@ namespace caldata {
 
   private:
     
-    bool         fDoBaselineSub;
-    std::string  fBaselineSubMethod;
-    int          fPostSampleBins;         ///< number of postsample bins
-    int          fBaseSampleBins;     ///< number of postsample bins
-    float        fBaseVarCut;         ///< baseline variance cut
+    bool          fDoBaselineSub;     ///< subtract baseline to restore DC component post-deconvolution
+    bool          fDoAdvBaselineSub;  ///< use interpolation-based baseline subtraction
+    int           fBaseSampleBins;    ///< bin grouping size in "interpolate"  method
+    float         fBaseVarCut;        ///< baseline variance cut used in "interpolate" method
     
     std::string  fDigitModuleLabel;   ///< module that made digits
                                                        
     std::string  fSpillName;  ///< nominal spill is an empty string
                               ///< it is set by the DigitModuleLabel
                               ///< ex.:  "daq:preSpill" for prespill data
+    
+    void          SubtractBaseline(std::vector<float>& holder);
+    void          SubtractBaselineAdv(std::vector<float>& holder);
+   
+    // front/back porch settings 
     int         fSamplePrecision;
     float       fFrontPorchFrac;
     float       fBackPorchFrac;
 
-    void SubtractBaseline(std::vector<float>& holder);
-    
-    detinfo::DetectorClocks const* fDetectorClocks;
-    detinfo::DetectorProperties const* fDetectorProperties;
-
-
+  
   protected: 
     
   }; // class CalWireSBND
@@ -111,20 +109,18 @@ namespace caldata {
   {
     fSpillName="";
     this->reconfigure(pset);
-    fDetectorClocks = lar::providerFrom<detinfo::DetectorClocksService>();
-    fDetectorProperties = lar::providerFrom<detinfo::DetectorPropertiesService>();
-    if( fFrontPorchFrac > 1. ) fFrontPorchFrac = 1.;
-    else if (fFrontPorchFrac < 0 ) fFrontPorchFrac = 0.;
-    if( fBackPorchFrac > 1. ) fBackPorchFrac = 1.;
-    else if (fBackPorchFrac < 0 ) fBackPorchFrac = 0.;
-      
+    
     fROITool = art::make_tool<sbnd_tool::IROIFinder>(pset.get<fhicl::ParameterSet>("ROITool"));
 
     //--Hec if(fSpillName.size()<1) produces< std::vector<recob::Wire> >();
     //--Hec else produces< std::vector<recob::Wire> >(fSpillName);
-  
     produces< std::vector<recob::Wire> >(fSpillName);
     produces<art::Assns<raw::RawDigit, recob::Wire>>(fSpillName);
+    
+    if( fFrontPorchFrac > 1. ) fFrontPorchFrac = 1.;
+    else if (fFrontPorchFrac < 0 ) fFrontPorchFrac = 0.;
+    if( fBackPorchFrac > 1. ) fBackPorchFrac = 1.;
+    else if (fBackPorchFrac < 0 ) fBackPorchFrac = 0.;
     
   }
   //-------------------------------------------------
@@ -136,11 +132,11 @@ namespace caldata {
   void CalWireSBND::reconfigure(fhicl::ParameterSet const& p)
   {
     fDigitModuleLabel = p.get< std::string >("DigitModuleLabel", "daq");
-    fPostSampleBins   = p.get< int >        ("PostSampleBins");
+    fDoBaselineSub    = p.get< bool >       ("DoBaselineSub");
+    fDoAdvBaselineSub = p.get< bool >       ("DoAdvBaselineSub");
     fBaseSampleBins   = p.get< int >        ("BaseSampleBins");
     fBaseVarCut       = p.get< int >        ("BaseVarCut");
-    fDoBaselineSub    = p.get< bool >       ("DoBaselineSub");
-    fBaselineSubMethod= p.get< std::string >("BaselineSubMethod","histogram");
+    
     fSamplePrecision  = p.get< int >        ("SamplePrecision",-1);
     fFrontPorchFrac   = p.get< float >        ("FrontPorchFrac",1.);
     fBackPorchFrac    = p.get< float >        ("BackPorchFrac",1.);
@@ -265,17 +261,12 @@ namespace caldata {
       
       holder.resize(dataSize,1e-5);
 
-      //This restores the DC component to signal removed by the deconvolution.
-      if(fPostSampleBins) {
-        float average=0.0;
-        for(bin=0; bin < (unsigned short)fPostSampleBins; ++bin) 
-          average += holder[holder.size()-1+bin];
-        average = average / (float)fPostSampleBins;
-        for(bin = 0; bin < holder.size(); ++bin) holder[bin]-=average;
-      } 
-      // baseline subtraction
+      // restore DC component through baseline subtraction
       if( fDoBaselineSub ) SubtractBaseline(holder);
-       
+      // more advanced, interpolation-based subtraction alg 
+      // that uses the BaseSampleBins and BaseVarCut params
+      if( fDoAdvBaselineSub ) SubtractBaselineAdv(holder);
+      
       // --------------------------------------------------
       // limit precision by truncating digits to save disk space after compression (taken from LArIAT)
       if( fSamplePrecision >= 0 ){
@@ -344,10 +335,40 @@ namespace caldata {
   
   void CalWireSBND::SubtractBaseline(std::vector<float>& holder)
   {
-    
-    if( fBaselineSubMethod == "interpolate" ) {
-
-      // subtract baseline using linear interpolation between regions defined
+    // Robust baseline calculation that effectively ignores outlier 
+    // samples from large pulses:
+    //   (1) fill a histogram with every sample's value,
+    //   (2) find mode (bin with most entries),
+    //   (3) calculate the mean along the entire waveform using
+    //       only samples with values close to this mode.
+    unsigned int bin(0);  
+    float min = 0, max = 0;
+    for(bin = 0; bin < holder.size(); bin++){
+      if (holder[bin] > max) max = holder[bin];
+      if (holder[bin] < min) min = holder[bin];
+    }
+    int nbin = max - min;
+    if (nbin > 0) {
+      TH1F h("h","h",nbin,min,max);
+      for(bin = 0; bin < holder.size(); bin++) h.Fill(holder[bin]);
+      float x_max = h.GetXaxis()->GetBinCenter(h.GetMaximumBin());
+      float ped   = x_max;
+      float sum   = 0;
+      int ncount  = 0;
+      for(bin = 0; bin < holder.size(); bin++){
+        if( fabs(holder[bin]-x_max) < 2. ) {
+          sum += holder[bin];
+          ncount++; 
+        }
+      }
+      if (ncount) ped = sum/ncount;
+      for(bin = 0; bin < holder.size(); bin++) holder[bin] -= ped;
+    }
+  }
+ 
+  void CalWireSBND::SubtractBaselineAdv(std::vector<float>& holder)
+  {
+      // Subtract baseline using linear interpolation between regions defined
       // by the datasize and fBaseSampleBins
 
       // number of points to characterize the baseline
@@ -460,80 +481,7 @@ namespace caldata {
         }
         holder[bin] -= base[region] + (bin - bof) * slp;
       }
+  }
 
 
-    } else if (fBaselineSubMethod == "histogram" ) {
-    
-     // subtract baseline by first using a histogram to set ADC bounds
-     // in order to exclude outlier samples (due to activity on wires)
-     float min = 0, max = 0;
-     for(unsigned int bin = 0; bin < holder.size(); bin++){
-       if (holder[bin] > max) max = holder[bin];
-       if (holder[bin] < min) min = holder[bin];
-     }
-     int nbin = max - min;
-     if (nbin!=0) {
-       TH1F *h1 = new TH1F("h1","h1",nbin,min,max);
-       for(unsigned int bin = 0; bin < holder.size(); bin++){
-         h1->Fill(holder[bin]);
-       }
-       float ped = h1->GetMaximum();
-       float ave = 0, ncount = 0;
-       for(unsigned int bin = 0; bin < holder.size(); bin++){
-         if (fabs(holder[bin]-ped) < 2){
-           ave += holder[bin];
-           ncount++;
-         }
-       }
-       if (ncount==0) ncount = 1;
-       ave = ave/ncount;
-       for(unsigned int bin = 0; bin < holder.size(); bin++){
-         holder[bin] -= ave;
-       }
-       h1->Delete();
-     }
-    
-    
-    }
-      
-
-  } // SubtractBaseline
-
-
-  /*
-  void CalWireSBND::SubtractBaseline(std::vector<float>& holder)
-  {
-    // subtract baseline by first using a histogram to set ADC bounds
-    // in order to exclude outlier samples (due to activity on wires)
-    float min = 0, max = 0;
-    for(unsigned int bin = 0; bin < holder.size(); bin++){
-      if (holder[bin] > max) max = holder[bin];
-      if (holder[bin] < min) min = holder[bin];
-    }
-    int nbin = max - min;
-    if (nbin!=0) {
-      TH1F *h1 = new TH1F("h1","h1",nbin,min,max);
-      for(unsigned int bin = 0; bin < holder.size(); bin++){
-	h1->Fill(holder[bin]);
-      }
-      float ped = h1->GetMaximum();
-      float ave = 0, ncount = 0;
-      for(unsigned int bin = 0; bin < holder.size(); bin++){
-	if (fabs(holder[bin]-ped) < 2){
-	  ave += holder[bin];
-	  ncount++;
-	}
-      }
-      if (ncount==0) ncount = 1;
-      ave = ave/ncount;
-      for(unsigned int bin = 0; bin < holder.size(); bin++){
-	holder[bin] -= ave;
-      }
-      h1->Delete();
-    }
-
-  }// SubtractBaselineAdv
-  
-*/
-  
 } // end namespace caldata
