@@ -12,10 +12,9 @@
 #include "fhiclcpp/types/Atom.h"
 #include "messagefacility/MessageLogger/MessageLogger.h"
 #include "nurandom/RandomUtils/NuRandomService.h"
-#include "CLHEP/Random/RandomEngine.h"
-#include "CLHEP/Random/JamesRandom.h"
 #include "CLHEP/Random/RandFlat.h"
 #include "CLHEP/Random/RandGaussQ.h"
+#include "CLHEP/Random/RandGeneral.h"
 #include "CLHEP/Random/RandPoissonQ.h"
 #include "CLHEP/Random/RandExponential.h"
 
@@ -35,10 +34,7 @@
 #include "lardataobj/Simulation/SimPhotons.h"
 #include "lardata/DetectorInfoServices/LArPropertiesService.h"
 
-#include "TMath.h"
-#include "TF1.h"
 #include "TFile.h"
-#include "TH1D.h"
 
 namespace opdet {
 
@@ -49,6 +45,7 @@ namespace opdet {
     struct ConfigurationParameters_t {
       double TransitTime; //ns
       double TTS; //ns
+      double CableTime; //ns
       double PMTChargeToADC; //voltage to ADC conversion scale
       double PMTBaseline; //waveform baseline in ADC
       double PMTFallTime; //pulse decaying time constant (exponential) in ns
@@ -63,7 +60,7 @@ namespace opdet {
       bool SinglePEmodel; //Model for single pe response, false for ideal, true for test bench meas
 
       detinfo::LArProperties const* larProp = nullptr; //< LarProperties service provider.
-      detinfo::DetectorClocks const* timeService = nullptr; //< DetectorClocks service provider.
+      double frequency;       //wave sampling frequency (GHz)
       CLHEP::HepRandomEngine* engine = nullptr;
     };// ConfigurationParameters_t
 
@@ -77,22 +74,37 @@ namespace opdet {
       sim::SimPhotons const& simphotons,
       std::vector<short unsigned int>& waveform,
       std::string pdtype,
-      std::unordered_map<int, sim::SimPhotons>& directPhotonsOnPMTS,
       double start_time,
       unsigned n_sample);
+
+    void ConstructWaveformCoatedPMT(
+      int ch,
+      std::vector<short unsigned int>& waveform,
+      std::unordered_map<int, sim::SimPhotons>& DirectPhotonsMap,
+      std::unordered_map<int, sim::SimPhotons>& ReflectedPhotonsMap,
+      double start_time,
+      unsigned n_sample);
+
     void ConstructWaveformLite(
       int ch,
       sim::SimPhotonsLite const& litesimphotons,
       std::vector<short unsigned int>& waveform,
       std::string pdtype,
-      std::unordered_map<int, sim::SimPhotonsLite>& directPhotonsOnPMTS,
+      double start_time,
+      unsigned n_sample);
+
+    void ConstructWaveformLiteCoatedPMT(
+      int ch,
+      std::vector<short unsigned int>& waveform,
+      std::unordered_map<int, sim::SimPhotonsLite>& DirectPhotonsMap,
+      std::unordered_map<int, sim::SimPhotonsLite>& ReflectedPhotonsMap,
       double start_time,
       unsigned n_sample);
 
     double Baseline()
-    {
-      return fParams.PMTBaseline;
-    }
+      {
+        return fParams.PMTBaseline;
+      }
 
   private:
 
@@ -114,9 +126,9 @@ namespace opdet {
     void Pulse1PE(std::vector<double>& wave);
     double Transittimespread(double fwhm);
 
-    std::vector<double> wsp; //single photon pulse vector
+    std::vector<double> fSinglePEWave; // single photon pulse vector
     int pulsesize; //size of 1PE waveform
-    TH1D* timeTPB; //histogram for getting the TPB emission time for coated PMTs
+    std::unique_ptr<CLHEP::RandGeneral> fTimeTPB; // histogram for getting the TPB emission time for coated PMTs
     std::unordered_map< raw::Channel_t, std::vector<double> > fFullWaveforms;
 
     void CreatePDWaveform(
@@ -124,15 +136,25 @@ namespace opdet {
       double t_min,
       std::vector<double>& wave,
       int ch,
-      std::string pdtype,
-      std::unordered_map<int, sim::SimPhotons>& directPhotonsOnPMTS);
+      std::string pdtype);
+    void CreatePDWaveformCoatedPMT(
+      int ch,
+      double t_min,
+      std::vector<double>& wave,
+      std::unordered_map<int, sim::SimPhotons>& DirectPhotonsMap,
+      std::unordered_map<int, sim::SimPhotons>& ReflectedPhotonsMap);
     void CreatePDWaveformLite(
       sim::SimPhotonsLite const& litesimphotons,
       double t_min,
       std::vector<double>& wave,
       int ch,
-      std::string pdtype,
-      std::unordered_map<int, sim::SimPhotonsLite>& directPhotonsOnPMTS);
+      std::string pdtype);
+    void CreatePDWaveformLiteCoatedPMT(
+      int ch,
+      double t_min,
+      std::vector<double>& wave,
+      std::unordered_map<int, sim::SimPhotonsLite>& DirectPhotonsMap,
+      std::unordered_map<int, sim::SimPhotonsLite>& ReflectedPhotonsMap);
     void CreateSaturation(std::vector<double>& wave);//Including saturation effects
     void AddLineNoise(std::vector<double>& wave); //add noise to baseline
     void AddDarkNoise(std::vector<double>& wave); //add dark noise
@@ -163,6 +185,11 @@ namespace opdet {
       fhicl::Atom<double> tts {
         Name("TTS"),
         Comment("Single pe: Transit time spread in ns")
+      };
+
+      fhicl::Atom<double> cableTime {
+        Name("CableTime"),
+        Comment("Time delay of the 30 m long readout cable in ns")
       };
 
       fhicl::Atom<double> pmtmeanAmplitude {
@@ -230,9 +257,9 @@ namespace opdet {
 
     std::unique_ptr<DigiPMTSBNDAlg> operator()(
       detinfo::LArProperties const& larProp,
-      detinfo::DetectorClocks const& detClocks,
+      detinfo::DetectorClocksData const& clockData,
       CLHEP::HepRandomEngine* engine
-    ) const;
+      ) const;
 
   private:
     // Part of the configuration learned from configuration files.

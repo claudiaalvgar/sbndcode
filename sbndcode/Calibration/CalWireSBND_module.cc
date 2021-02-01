@@ -221,6 +221,8 @@ namespace caldata {
     std::vector<short> rawadc(transformSize);  // vector holding uncompressed adc values
     std::vector<TComplex> freqHolder(transformSize+1); // temporary frequency data
     
+    auto const clockData = art::ServiceHandle<detinfo::DetectorClocksService const>()->DataFor(evt);
+
     // loop over all wires    
     wirecol->reserve(digitVecHandle->size());
     for(size_t rdIter = 0; rdIter < digitVecHandle->size(); ++rdIter){ // ++ move
@@ -255,7 +257,7 @@ namespace caldata {
 	}
 
         // Do deconvolution.
-        sss->Deconvolute(channel, holder);
+        sss->Deconvolute(clockData, channel, holder);
 	  for(bin = 0; bin < holder.size(); ++bin) holder[bin]=holder[bin]/DeconNorm;
       } // end if not a bad channel 
       
