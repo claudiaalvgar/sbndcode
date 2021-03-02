@@ -1,0 +1,15 @@
+#include "3drift_services_sbnd.fcl"
+
+########################################################
+# Use only 50% of front/back porch in detector readout, 
+# leaving G4 reference times the same.
+########################################################
+
+# One drift window is 2500 time-ticks. 
+# Detector is read out for total time equivalent to 50+100+50% of this interval.
+services.DetectorPropertiesService.NumberTimeSamples:	5000
+services.DetectorPropertiesService.ReadOutWindowSize:	5000
+
+# TPC readout starts 20% of a readout window before the neutrino arrives (which we set to t0)
+services.DetectorClocksService.TriggerOffsetTPC:	-0.625e3 # [us]
+

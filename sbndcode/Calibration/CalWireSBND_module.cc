@@ -40,6 +40,7 @@
 #include "lardata/Utilities/LArFFT.h"
 #include "lardataobj/Utilities/sparse_vector.h"
 #include "lardata/Utilities/AssociationUtil.h"  //--Hec
+#include "lardata/DetectorInfoServices/DetectorPropertiesService.h"
 #include "lardata/DetectorInfoServices/DetectorClocksService.h"
 
 #include "TComplex.h"
@@ -80,7 +81,7 @@ namespace caldata {
     bool          fDoAdvBaselineSub;  ///< use interpolation-based baseline subtraction
     int           fBaseSampleBins;    ///< bin grouping size in "interpolate"  method
     float         fBaseVarCut;        ///< baseline variance cut used in "interpolate" method
-   
+    
     std::string  fDigitModuleLabel;   ///< module that made digits
                                                        
     std::string  fSpillName;  ///< nominal spill is an empty string
@@ -89,8 +90,13 @@ namespace caldata {
     
     void          SubtractBaseline(std::vector<float>& holder);
     void          SubtractBaselineAdv(std::vector<float>& holder);
-    
+   
+    // front/back porch settings 
+    float       fSamplePrecision;
+    float       fFrontPorchFrac;
+    float       fBackPorchFrac;
 
+  
   protected: 
     
   }; // class CalWireSBND
@@ -111,6 +117,11 @@ namespace caldata {
     produces< std::vector<recob::Wire> >(fSpillName);
     produces<art::Assns<raw::RawDigit, recob::Wire>>(fSpillName);
     
+    if( fFrontPorchFrac > 1. ) fFrontPorchFrac = 1.;
+    else if (fFrontPorchFrac < 0 ) fFrontPorchFrac = 0.;
+    if( fBackPorchFrac > 1. ) fBackPorchFrac = 1.;
+    else if (fBackPorchFrac < 0 ) fBackPorchFrac = 0.;
+    
   }
   //-------------------------------------------------
   CalWireSBND::~CalWireSBND()
@@ -125,6 +136,10 @@ namespace caldata {
     fDoAdvBaselineSub = p.get< bool >       ("DoAdvBaselineSub");
     fBaseSampleBins   = p.get< int >        ("BaseSampleBins");
     fBaseVarCut       = p.get< int >        ("BaseVarCut");
+    
+    fSamplePrecision  = p.get< int >        ("SamplePrecision",-1);
+    fFrontPorchFrac   = p.get< float >        ("FrontPorchFrac",1.);
+    fBackPorchFrac    = p.get< float >        ("BackPorchFrac",1.);
     
     fSpillName="";
     
@@ -253,6 +268,24 @@ namespace caldata {
       // more advanced, interpolation-based subtraction alg 
       // that uses the BaseSampleBins and BaseVarCut params
       if( fDoAdvBaselineSub ) SubtractBaselineAdv(holder);
+      
+      // --------------------------------------------------
+      // limit precision by truncating digits to save disk space after compression
+      if( fSamplePrecision >= 0 ){
+        for(size_t iholder = 0; iholder < holder.size(); ++iholder) 
+	  holder[iholder] = roundf( holder[iholder] / fSamplePrecision ) * fSamplePrecision;
+      }
+
+      // --------------------------------------------------
+      // Now reduce the readout window size before searching for ROIs.
+      // We assume the MC we're feeding in was generated with 3 windows.
+      if( fFrontPorchFrac < 1. || fBackPorchFrac < 1. ) {
+        int driftWindowSize = 2500;
+        size_t fp_start  = driftWindowSize*(1.-fFrontPorchFrac);
+        size_t bp_end    = driftWindowSize*(2.+fBackPorchFrac);
+        if( fp_start > 0 ){ for(size_t i=0; i<fp_start; i++) holder[i] = 0;}
+        if( bp_end < dataSize ){ for(size_t i=bp_end; i<dataSize; i++) holder[i] = 0;}
+      }
 
       // Make a single ROI that spans the entire data size
       //RegionsOfInterest_t sparse_holder;
@@ -298,7 +331,7 @@ namespace caldata {
    // delete chanFilt;
     return;
   }
- 
+  
   
   void CalWireSBND::SubtractBaseline(std::vector<float>& holder)
   {
@@ -448,7 +481,7 @@ namespace caldata {
         }
         holder[bin] -= base[region] + (bin - bof) * slp;
       }
-    }
-  
+  }
+
 
 } // end namespace caldata
