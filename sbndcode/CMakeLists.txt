@@ -34,3 +34,4 @@ add_subdirectory(Filters)
 
 add_subdirectory(MyAnalysis)
 add_subdirectory(MyCalib)
+add_subdirectory(MySelect)
